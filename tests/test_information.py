@@ -4,6 +4,7 @@ import pytest
 from descriptor_limitations.information import (
     conditional_entropy,
     entropy,
+    mutual_information,
     singleton_fraction,
 )
 
@@ -151,3 +152,55 @@ def test_singleton_fraction_mixed():
 def test_singleton_fraction_2d():
     X = np.array([[0, 0], [0, 0], [1, 1], [1, 2]])  # (0,0) x2; (1,1), (1,2) singletons
     assert singleton_fraction(X) == pytest.approx(0.5)
+
+
+# ---------- mutual_information ----------
+
+def test_mutual_information_self():
+    """I(y; y) = H(y) (plug-in)."""
+    rng = np.random.default_rng(3)
+    y = rng.integers(0, 5, size=500)
+    _, counts = np.unique(y, return_counts=True)
+    p = counts / counts.sum()
+    H_y = -np.sum(p * np.log2(p))
+    assert mutual_information(y, y, correction="none") == pytest.approx(H_y)
+
+
+def test_mutual_information_deterministic():
+    """y = f(X), invertible -> I(y; X) = H(y) (plug-in)."""
+    rng = np.random.default_rng(4)
+    X = rng.integers(0, 4, size=800)
+    y = 3 * X + 1
+    _, counts = np.unique(y, return_counts=True)
+    p = counts / counts.sum()
+    H_y = -np.sum(p * np.log2(p))
+    assert mutual_information(y, X, correction="none") == pytest.approx(H_y)
+
+
+def test_mutual_information_symmetry_plugin():
+    """I(y; X) == I(X; y) under plug-in (no MM asymmetry)."""
+    rng = np.random.default_rng(5)
+    y = rng.integers(0, 3, size=600)
+    X = rng.integers(0, 4, size=600)
+    a = mutual_information(y, X, correction="none")
+    b = mutual_information(X, y, correction="none")
+    assert a == pytest.approx(b)
+
+
+def test_mutual_information_independent_small_for_large_n():
+    """Independent y, X -> plug-in I is small but positive (finite-sample bias)."""
+    rng = np.random.default_rng(6)
+    n = 5000
+    y = rng.integers(0, 3, size=n)
+    X = rng.integers(0, 3, size=n)
+    I_plugin = mutual_information(y, X, correction="none")
+    assert 0.0 <= I_plugin < 0.05
+
+
+def test_mutual_information_nonnegative_plugin():
+    """Plug-in I is always >= 0."""
+    rng = np.random.default_rng(7)
+    for _ in range(10):
+        y = rng.integers(0, 4, size=200)
+        X = rng.integers(0, 4, size=200)
+        assert mutual_information(y, X, correction="none") >= 0.0

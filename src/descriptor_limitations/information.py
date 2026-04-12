@@ -213,3 +213,77 @@ def conditional_entropy(
             mm_correction += (K_j - 1) / (2.0 * n * _LN2)
 
     return float(total + mm_correction)
+
+
+def _marginal_entropy(
+    y: ArrayLike,
+    correction: Literal["none", "miller-madow"] = "miller-madow",
+) -> float:
+    """Sample estimate of H(X_math) from labels `y`, with optional MM correction.
+
+    Miller-Madow correction is (K - 1) / (2 N ln 2), where K is the number
+    of distinct labels observed in `y`.
+    """
+    if correction not in ("none", "miller-madow"):
+        raise ValueError(
+            f"correction must be 'none' or 'miller-madow', got {correction!r}"
+        )
+    y_arr = np.asarray(y)
+    if y_arr.ndim != 1:
+        raise ValueError(f"y must be 1-D, got shape {y_arr.shape}")
+    n = y_arr.shape[0]
+    if n == 0:
+        raise ValueError("y is empty")
+    _, counts = np.unique(y_arr, return_counts=True)
+    p = counts / n
+    H_plugin = -np.sum(p * np.log2(p))
+    if correction == "miller-madow":
+        K = counts.shape[0]
+        H_plugin += (K - 1) / (2.0 * n * _LN2)
+    return float(H_plugin)
+
+
+def mutual_information(
+    y: ArrayLike,
+    X: ArrayLike,
+    correction: Literal["none", "miller-madow"] = "miller-madow",
+) -> float:
+    """Mutual information I(X_math; Y_math) in bits, estimated from samples.
+
+    Math
+    ----
+    I(X; Y) = H(X) - H(X | Y).
+
+    Convention
+    ----------
+    Code `y` (shape (n,))           = math X (outcome).
+    Code `X` (shape (n,) or (n, d)) = math Y (descriptor).
+
+    Parameters
+    ----------
+    y : array-like, shape (n,)
+        Outcome labels.
+    X : array-like, shape (n,) or (n, d)
+        Descriptor labels; 2-D is combined row-wise.
+    correction : {"none", "miller-madow"}, default "miller-madow"
+        Applied to both H(X_math) and H(X_math | Y_math) consistently.
+
+    Returns
+    -------
+    I : float
+        Mutual information in bits. Theoretically non-negative; the
+        plug-in estimate is also non-negative. The Miller-Madow
+        estimate can be slightly negative in degenerate small-sample
+        cases because the correction terms for H(X) and H(X|Y) are
+        not linked.
+
+    Notes
+    -----
+    For the true quantity, I(X;Y) = I(Y;X). The plug-in estimate is
+    symmetric up to floating-point error; the Miller-Madow estimate is
+    NOT symmetric because the correction uses per-stratum support sizes
+    of the conditioning variable.
+    """
+    H_marginal = _marginal_entropy(y, correction=correction)
+    H_cond = conditional_entropy(y, X, correction=correction)
+    return H_marginal - H_cond
