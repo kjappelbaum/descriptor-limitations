@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Data (raw datasets not committed; keep directory structure + READMEs)
+data/**
+!data/**/
+!data/**/.gitkeep
+!data/**/README.md
+
+# Figures (regenerated from scripts)
+figures/*
+!figures/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

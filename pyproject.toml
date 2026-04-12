@@ -1,0 +1,28 @@
+[project]
+name = "descriptor-limitations"
+version = "0.1.0"
+description = "Information-theoretic accuracy ceilings for ML in chemistry and materials science."
+readme = "README.md"
+authors = [
+    { name = "Kevin Maik Jablonka", email = "mail@kjablonka.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "marimo>=0.23.1",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "pandas>=3.0.2",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.16,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.10",
+]
