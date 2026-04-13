@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 
 from descriptor_limitations.information import (
+    BootstrapCI,
     R2CeilingResult,
+    bootstrap_ci,
     conditional_entropy,
     entropy,
     mutual_information,
@@ -342,3 +344,110 @@ def test_r2_ceiling_mixed_singletons_bracket_orders_correctly():
     assert r.pessimistic < r.optimistic
     assert 0.0 <= r.pessimistic
     assert r.optimistic <= 1.0
+
+
+# ---------- bootstrap_ci ----------
+
+def _mean_of_y(y, g):
+    return float(np.mean(y))
+
+
+def _r2_opt(y, g):
+    return r2_ceiling(y, g).optimistic
+
+
+def test_bootstrap_ci_constant_func_collapses():
+    """A func that ignores data returns a zero-width CI."""
+    y = np.arange(20.0)
+    g = np.arange(20)
+    result = bootstrap_ci(
+        y, g, lambda y, g: 3.14,
+        n_boot=50, ci=0.95, mode="pairs", random_state=0,
+    )
+    assert isinstance(result, BootstrapCI)
+    assert result.point_estimate == pytest.approx(3.14)
+    assert result.lower == pytest.approx(3.14)
+    assert result.upper == pytest.approx(3.14)
+
+
+def test_bootstrap_ci_mean_covers_true_value():
+    """Pairs bootstrap of the sample mean: CI covers the true mean loosely."""
+    rng = np.random.default_rng(0)
+    y = rng.normal(loc=5.0, scale=1.0, size=500)
+    g = np.zeros(500, dtype=int)
+    res = bootstrap_ci(
+        y, g, _mean_of_y,
+        n_boot=500, ci=0.95, mode="pairs", random_state=1,
+    )
+    # Sample mean SE ~ 1/sqrt(500) ~ 0.045. CI half-width ~ 0.09. True mean 5.0.
+    assert res.lower < 5.0 < res.upper
+    assert (res.upper - res.lower) < 0.5
+
+
+def test_bootstrap_ci_r2_ceiling_pairs_brackets_point():
+    """Pairs bootstrap of optimistic R^2_ceiling runs and brackets the point."""
+    rng = np.random.default_rng(2)
+    # Structured: 3 groups, different means + noise -> nonzero ceiling.
+    g = rng.integers(0, 3, size=300)
+    y = g * 5.0 + rng.normal(scale=1.0, size=300)
+    res = bootstrap_ci(
+        y, g, _r2_opt,
+        n_boot=200, ci=0.90, mode="pairs", random_state=3,
+    )
+    assert res.lower <= res.point_estimate <= res.upper
+
+
+def test_bootstrap_ci_within_group_zero_when_no_within_variance():
+    """within-group mode: if y is constant per group, bootstrap samples are identical."""
+    y = np.array([1.0, 1.0, 1.0, 5.0, 5.0, 5.0])
+    g = np.array([0, 0, 0, 1, 1, 1])
+    res = bootstrap_ci(
+        y, g, _r2_opt,
+        n_boot=100, ci=0.95, mode="within-group", random_state=4,
+    )
+    assert res.lower == pytest.approx(res.upper)
+    assert res.point_estimate == pytest.approx(1.0)
+
+
+def test_bootstrap_ci_reproducible():
+    """Same random_state -> identical samples."""
+    y = np.arange(30.0)
+    g = np.tile(np.arange(3), 10)
+    r1 = bootstrap_ci(y, g, _mean_of_y, n_boot=50, ci=0.95, mode="pairs", random_state=7)
+    r2 = bootstrap_ci(y, g, _mean_of_y, n_boot=50, ci=0.95, mode="pairs", random_state=7)
+    assert np.allclose(r1.samples, r2.samples)
+
+
+def test_bootstrap_ci_rejects_bad_mode():
+    with pytest.raises(ValueError, match="mode"):
+        bootstrap_ci(
+            np.array([1.0, 2.0]), np.array([0, 1]), _mean_of_y,
+            n_boot=10, ci=0.95, mode="jackknife", random_state=0,
+        )
+
+
+def test_bootstrap_ci_rejects_bad_ci():
+    with pytest.raises(ValueError, match="ci"):
+        bootstrap_ci(
+            np.array([1.0, 2.0]), np.array([0, 1]), _mean_of_y,
+            n_boot=10, ci=1.5, mode="pairs", random_state=0,
+        )
+
+
+def test_bootstrap_ci_rejects_bad_n_boot():
+    with pytest.raises(ValueError, match="n_boot"):
+        bootstrap_ci(
+            np.array([1.0, 2.0]), np.array([0, 1]), _mean_of_y,
+            n_boot=0, ci=0.95, mode="pairs", random_state=0,
+        )
+
+
+def test_bootstrap_ci_catches_nonfinite():
+    def bad_func(y, g):
+        return np.nan
+
+    with pytest.raises(ValueError, match="non-finite"):
+        bootstrap_ci(
+            np.array([1.0, 2.0]), np.array([0, 1]), bad_func,
+            n_boot=10, ci=0.95, mode="pairs", random_state=0,
+        )

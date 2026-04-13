@@ -14,8 +14,8 @@ Docstrings state results using the information-theoretic math symbols
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Callable, Literal
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -488,4 +488,160 @@ def r2_ceiling(
         n_singletons=n_singletons,
         singleton_fraction=n_in_singletons / n,
         var_y=var_y,
+    )
+
+
+@dataclass(frozen=True)
+class BootstrapCI:
+    """Percentile-based bootstrap confidence interval for a scalar statistic.
+
+    Attributes
+    ----------
+    point_estimate : float
+        Value of `func(y, groups)` on the original (non-resampled) data.
+    lower, upper : float
+        Percentile bounds at the requested confidence level.
+    ci_level : float
+        Confidence level used (e.g. 0.95).
+    n_boot : int
+        Number of bootstrap replicates.
+    mode : str
+        Resampling scheme ("pairs" or "within-group").
+    samples : np.ndarray, shape (n_boot,)
+        Raw bootstrap replicates of the statistic, for diagnostics
+        (histogram, bias estimate, etc.).
+    """
+
+    point_estimate: float
+    lower: float
+    upper: float
+    ci_level: float
+    n_boot: int
+    mode: str
+    samples: np.ndarray = field(repr=False)
+
+
+def bootstrap_ci(
+    y: ArrayLike,
+    groups: ArrayLike,
+    func: Callable[[np.ndarray, np.ndarray], float],
+    *,
+    n_boot: int,
+    ci: float,
+    mode: Literal["pairs", "within-group"],
+    random_state: int | np.random.Generator | None = None,
+) -> BootstrapCI:
+    """Percentile bootstrap CI for a scalar statistic of (y, groups).
+
+    Two resampling schemes are supported; the choice must be made
+    explicitly because it reflects an inferential claim:
+
+    * "pairs": resample (y_i, groups_i) tuples with replacement. Use
+      when the data are i.i.d. draws from a population (observational
+      or randomly designed experiments). Captures both within-group
+      and between-group variability.
+    * "within-group": for each distinct group label, resample that
+      group's y values with replacement; group structure is fixed.
+      Use when groups are a fixed design and only measurement noise
+      within groups is random. Yields zero CI for groups with no
+      replicates.
+
+    For fixed full-factorial designs with no replicates (e.g. Doyle
+    Buchwald-Hartwig), neither scheme is fully coherent; prefer the
+    singleton bracket from `r2_ceiling` as the uncertainty summary.
+
+    Parameters
+    ----------
+    y : array-like, shape (n,)
+        Outcome passed through to `func`.
+    groups : array-like, shape (n,) or (n, d)
+        Groups passed through to `func`.
+    func : callable
+        Must accept `(y_resampled, groups_resampled)` and return a
+        finite float.
+    n_boot : int
+        Number of bootstrap replicates (required). Typical 1000.
+    ci : float
+        Confidence level in (0, 1), e.g. 0.95.
+    mode : {"pairs", "within-group"}
+        Resampling scheme.
+    random_state : int, np.random.Generator, or None
+        Seed or generator for reproducibility.
+
+    Returns
+    -------
+    BootstrapCI
+        Bracketed CI with the raw replicates attached.
+
+    Raises
+    ------
+    ValueError
+        If `n_boot` or `ci` is out of range, `mode` is unknown, or a
+        bootstrap replicate yields a non-finite value.
+    """
+    if mode not in ("pairs", "within-group"):
+        raise ValueError(
+            f"mode must be 'pairs' or 'within-group', got {mode!r}"
+        )
+    if not (isinstance(n_boot, (int, np.integer)) and n_boot >= 1):
+        raise ValueError(f"n_boot must be a positive int, got {n_boot!r}")
+    if not (0.0 < ci < 1.0):
+        raise ValueError(f"ci must be in (0, 1), got {ci!r}")
+
+    y_arr = np.asarray(y)
+    groups_arr = np.asarray(groups)
+    n = y_arr.shape[0]
+    if n == 0:
+        raise ValueError("y is empty")
+    if groups_arr.shape[0] != n:
+        raise ValueError(
+            f"groups has {groups_arr.shape[0]} samples, expected {n}"
+        )
+
+    rng = np.random.default_rng(random_state)
+    point = float(func(y_arr, groups_arr))
+    if not np.isfinite(point):
+        raise ValueError("func returned a non-finite value on original data")
+
+    samples = np.empty(n_boot, dtype=float)
+
+    if mode == "pairs":
+        for b in range(n_boot):
+            idx = rng.integers(0, n, size=n)
+            val = float(func(y_arr[idx], groups_arr[idx]))
+            if not np.isfinite(val):
+                raise ValueError(
+                    f"func returned non-finite on bootstrap replicate {b}"
+                )
+            samples[b] = val
+    else:  # within-group
+        # Group samples are resampled with replacement *within* each group;
+        # 2-D groups are handled by composite labels.
+        labels = _as_composite_labels(groups_arr, n_expected=n)
+        unique, inv = np.unique(labels, return_inverse=True)
+        # Precompute indices per group.
+        group_indices = [np.where(inv == j)[0] for j in range(unique.shape[0])]
+        for b in range(n_boot):
+            resampled = np.empty(n, dtype=np.int64)
+            for g_idx in group_indices:
+                picks = rng.integers(0, g_idx.shape[0], size=g_idx.shape[0])
+                resampled[g_idx] = g_idx[picks]
+            val = float(func(y_arr[resampled], groups_arr[resampled]))
+            if not np.isfinite(val):
+                raise ValueError(
+                    f"func returned non-finite on bootstrap replicate {b}"
+                )
+            samples[b] = val
+
+    alpha = (1.0 - ci) / 2.0
+    lower = float(np.quantile(samples, alpha))
+    upper = float(np.quantile(samples, 1.0 - alpha))
+    return BootstrapCI(
+        point_estimate=point,
+        lower=lower,
+        upper=upper,
+        ci_level=ci,
+        n_boot=n_boot,
+        mode=mode,
+        samples=samples,
     )
