@@ -2,10 +2,13 @@ import numpy as np
 import pytest
 
 from descriptor_limitations.information import (
+    R2CeilingResult,
     conditional_entropy,
     entropy,
     mutual_information,
+    r2_ceiling,
     singleton_fraction,
+    within_group_variance,
 )
 
 
@@ -204,3 +207,138 @@ def test_mutual_information_nonnegative_plugin():
         y = rng.integers(0, 4, size=200)
         X = rng.integers(0, 4, size=200)
         assert mutual_information(y, X, correction="none") >= 0.0
+
+
+# ---------- within_group_variance ----------
+
+def test_within_group_variance_zero_when_groups_constant():
+    """If y is constant within each group, within-group variance = 0."""
+    y = np.array([1.0, 1.0, 1.0, 5.0, 5.0, 5.0])
+    g = np.array([0, 0, 0, 1, 1, 1])
+    for assumption in ("zero", "marginal"):
+        assert within_group_variance(y, g, singleton_assumption=assumption) == pytest.approx(0.0)
+
+
+def test_within_group_variance_hand_computed():
+    """Two groups, no singletons.
+
+    Group 0: [1, 3, 5], pop var = 8/3; n=3.
+    Group 1: [2, 4],    pop var = 1;    n=2.
+    Weighted: (3/5)*(8/3) + (2/5)*1 = 8/5 + 2/5 = 2.0.
+    """
+    y = np.array([1.0, 3.0, 5.0, 2.0, 4.0])
+    g = np.array([0, 0, 0, 1, 1])
+    assert within_group_variance(y, g, singleton_assumption="zero") == pytest.approx(2.0)
+
+
+def test_within_group_variance_singletons_zero_vs_marginal():
+    """Singleton group contributes 0 under 'zero', Var(y) under 'marginal'."""
+    # Two samples in group 0 with values 0,2 (var=1); one singleton group with value 10.
+    y = np.array([0.0, 2.0, 10.0])
+    g = np.array([0, 0, 1])
+    var_y = float(np.var(y, ddof=0))  # known
+
+    # Non-singleton contribution: (2/3)*1 = 2/3
+    opt = within_group_variance(y, g, singleton_assumption="zero")
+    pes = within_group_variance(y, g, singleton_assumption="marginal")
+    assert opt == pytest.approx(2.0 / 3.0)
+    assert pes == pytest.approx(2.0 / 3.0 + (1.0 / 3.0) * var_y)
+
+
+def test_within_group_variance_rejects_bad_assumption():
+    y = np.array([1.0, 2.0, 3.0])
+    g = np.array([0, 0, 1])
+    with pytest.raises(ValueError, match="singleton_assumption"):
+        within_group_variance(y, g, singleton_assumption="raise")
+
+
+def test_within_group_variance_rejects_nonfinite():
+    y = np.array([1.0, np.nan, 3.0])
+    g = np.array([0, 0, 1])
+    with pytest.raises(ValueError, match="non-finite"):
+        within_group_variance(y, g, singleton_assumption="zero")
+
+
+# ---------- r2_ceiling ----------
+
+def test_r2_ceiling_perfect_when_groups_determine_y():
+    """Zero within-group variance -> R^2_ceiling = 1 (no singletons, bracket collapses)."""
+    y = np.array([1.0, 1.0, 5.0, 5.0, 9.0, 9.0])
+    g = np.array([0, 0, 1, 1, 2, 2])
+    r = r2_ceiling(y, g)
+    assert isinstance(r, R2CeilingResult)
+    assert r.n_singletons == 0
+    assert r.optimistic == r.pessimistic
+    assert r.optimistic == pytest.approx(1.0)
+
+
+def test_r2_ceiling_hand_computed_no_singletons():
+    """Using the same 2-group example: Var(y)_pop, wgv=2, so R^2 = 1 - 2/Var(y)."""
+    y = np.array([1.0, 3.0, 5.0, 2.0, 4.0])
+    g = np.array([0, 0, 0, 1, 1])
+    var_y = np.var(y, ddof=0)
+    expected = 1.0 - 2.0 / var_y
+    r = r2_ceiling(y, g)
+    assert r.n_singletons == 0
+    assert r.optimistic == pytest.approx(expected)
+    assert r.pessimistic == pytest.approx(expected)
+    assert r.n_groups == 2
+    assert r.n_samples == 5
+    assert r.singleton_fraction == pytest.approx(0.0)
+    assert r.var_y == pytest.approx(var_y)
+
+
+def test_r2_ceiling_all_singletons_brackets_01():
+    """Every group is a singleton -> optimistic=1, pessimistic=0."""
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    g = np.arange(5)
+    r = r2_ceiling(y, g)
+    assert r.n_singletons == 5
+    assert r.singleton_fraction == pytest.approx(1.0)
+    assert r.optimistic == pytest.approx(1.0)
+    assert r.pessimistic == pytest.approx(0.0)
+
+
+def test_r2_ceiling_random_groups_near_zero():
+    """Random group assignment -> pessimistic close to 0 (on average)."""
+    rng = np.random.default_rng(42)
+    y = rng.normal(size=2000)
+    g = rng.integers(0, 20, size=2000)
+    r = r2_ceiling(y, g)
+    assert r.n_singletons == 0 or r.n_singletons < 5
+    # With N=2000 in ~20 random groups, ceiling should be near zero.
+    assert abs(r.optimistic) < 0.05
+    assert abs(r.pessimistic) < 0.05
+
+
+def test_r2_ceiling_raises_constant_y():
+    y = np.ones(10)
+    g = np.arange(10)
+    with pytest.raises(ValueError, match="Var\\(y\\)"):
+        r2_ceiling(y, g)
+
+
+def test_r2_ceiling_2d_matches_composite():
+    """Multi-column groups = row-wise composite 1-D labels."""
+    rng = np.random.default_rng(11)
+    y = rng.normal(size=300)
+    c1 = rng.integers(0, 3, size=300)
+    c2 = rng.integers(0, 4, size=300)
+    g_2d = np.stack([c1, c2], axis=1)
+    g_1d = c1 * 10 + c2
+    r_2d = r2_ceiling(y, g_2d)
+    r_1d = r2_ceiling(y, g_1d)
+    assert r_2d.optimistic == pytest.approx(r_1d.optimistic)
+    assert r_2d.pessimistic == pytest.approx(r_1d.pessimistic)
+    assert r_2d.n_groups == r_1d.n_groups
+
+
+def test_r2_ceiling_mixed_singletons_bracket_orders_correctly():
+    """Pessimistic <= optimistic always; strictly less when singletons exist."""
+    y = np.array([0.0, 2.0, 10.0, -5.0])
+    g = np.array([0, 0, 1, 2])  # group 0 has 2, groups 1,2 are singletons
+    r = r2_ceiling(y, g)
+    assert r.n_singletons == 2
+    assert r.pessimistic < r.optimistic
+    assert 0.0 <= r.pessimistic
+    assert r.optimistic <= 1.0

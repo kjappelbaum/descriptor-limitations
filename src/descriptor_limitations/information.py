@@ -14,12 +14,52 @@ Docstrings state results using the information-theoretic math symbols
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike
 
 _LN2 = np.log(2.0)
+
+
+@dataclass(frozen=True)
+class R2CeilingResult:
+    """Bracketed R^2 ceiling with diagnostics for singleton-group ambiguity.
+
+    Attributes
+    ----------
+    optimistic : float
+        Highest R^2_ceiling consistent with the data. Computed by assigning
+        Var(y | g=j) = 0 to every singleton group (g_j with n_j = 1).
+        Use as the *upper bound* on R^2_ceiling.
+    pessimistic : float
+        Lowest R^2_ceiling consistent with the data. Computed by assigning
+        Var(y | g=j) = Var(y) to every singleton group. Use as the *lower
+        bound* on R^2_ceiling.
+    n_samples : int
+        Total samples used.
+    n_groups : int
+        Number of distinct group labels (joint of all columns if 2-D).
+    n_singletons : int
+        Number of singleton groups (n_j = 1). When 0,
+        `optimistic == pessimistic` exactly and either is the ceiling.
+    singleton_fraction : float
+        Fraction of samples that fall into singleton groups, in [0, 1].
+        High values indicate the descriptor is too high-resolution for
+        the dataset; consider coarsening.
+    var_y : float
+        Population variance of `y` (ddof=0). Provided for context and so
+        the within-group variance can be reconstructed if desired.
+    """
+
+    optimistic: float
+    pessimistic: float
+    n_samples: int
+    n_groups: int
+    n_singletons: int
+    singleton_fraction: float
+    var_y: float
 
 
 def entropy(p: ArrayLike) -> float:
@@ -287,3 +327,165 @@ def mutual_information(
     H_marginal = _marginal_entropy(y, correction=correction)
     H_cond = conditional_entropy(y, X, correction=correction)
     return H_marginal - H_cond
+
+
+def _prepare_group_labels(
+    y: ArrayLike, groups: ArrayLike
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate (y, groups) and return (y_float, integer group labels)."""
+    y_arr = np.asarray(y, dtype=float)
+    if y_arr.ndim != 1:
+        raise ValueError(f"y must be 1-D, got shape {y_arr.shape}")
+    n = y_arr.shape[0]
+    if n == 0:
+        raise ValueError("y is empty")
+    if not np.all(np.isfinite(y_arr)):
+        raise ValueError("y contains non-finite values")
+    labels = _as_composite_labels(groups, n_expected=n)
+    return y_arr, labels
+
+
+def within_group_variance(
+    y: ArrayLike,
+    groups: ArrayLike,
+    singleton_assumption: Literal["zero", "marginal"],
+) -> float:
+    """Weighted within-group variance E_g[Var(y | g)] (population, ddof=0).
+
+    Math
+    ----
+    E[Var(y | g)] = sum_j (n_j / N) * Var(y_j)
+    where Var(y_j) is the population variance of y within group j. For
+    singleton groups (n_j = 1), Var(y_j) is undefined; the user must
+    declare an assumption explicitly.
+
+    Parameters
+    ----------
+    y : array-like, shape (n,)
+        Continuous outcome.
+    groups : array-like, shape (n,) or (n, d)
+        Group labels. 2-D is combined row-wise into composite labels.
+    singleton_assumption : {"zero", "marginal"}
+        How to fill in Var(y | g=j) for singleton groups:
+          * "zero"     -> Var(y_j) = 0 (optimistic; yields the upper
+            bound on R^2_ceiling).
+          * "marginal" -> Var(y_j) = Var(y) (pessimistic; yields the
+            lower bound on R^2_ceiling).
+
+    Returns
+    -------
+    wgv : float
+        Weighted within-group variance in the same units as y^2.
+
+    Raises
+    ------
+    ValueError
+        If inputs are malformed or `singleton_assumption` is unknown.
+    """
+    if singleton_assumption not in ("zero", "marginal"):
+        raise ValueError(
+            "singleton_assumption must be 'zero' or 'marginal', "
+            f"got {singleton_assumption!r}"
+        )
+    y_arr, labels = _prepare_group_labels(y, groups)
+    n = y_arr.shape[0]
+    unique, inv = np.unique(labels, return_inverse=True)
+    var_y = float(np.var(y_arr, ddof=0))
+    total = 0.0
+    for j in range(unique.shape[0]):
+        mask = inv == j
+        n_j = int(mask.sum())
+        if n_j == 1:
+            v_j = 0.0 if singleton_assumption == "zero" else var_y
+        else:
+            v_j = float(np.var(y_arr[mask], ddof=0))
+        total += (n_j / n) * v_j
+    return total
+
+
+def r2_ceiling(
+    y: ArrayLike,
+    groups: ArrayLike,
+) -> R2CeilingResult:
+    """Information-theoretic R^2 ceiling for predicting `y` from `groups`.
+
+    Math
+    ----
+    R^2_ceiling = 1 - Var(y | g) / Var(y)
+
+    where Var(y) is the marginal population variance (ddof=0) and
+    Var(y | g) = E_g[Var(y | g=j)]. This is an upper bound on the
+    coefficient of determination achievable by any predictor that sees
+    only `groups`, by the law of total variance.
+
+    Convention
+    ----------
+    Code `y`      (shape (n,))           = math X (continuous outcome).
+    Code `groups` (shape (n,) or (n, d)) = math Y (categorical descriptor;
+    columns are combined row-wise into a joint label).
+
+    Singleton groups (n_j = 1) carry zero information about Var(y | g=j).
+    The function reports both the optimistic ceiling (singletons -> Var=0)
+    and the pessimistic ceiling (singletons -> Var=Var(y)). When there are
+    no singletons, the two numbers coincide exactly.
+
+    Parameters
+    ----------
+    y : array-like, shape (n,)
+        Continuous outcome. Must be finite.
+    groups : array-like, shape (n,) or (n, d)
+        Group labels, 1-D or row-wise-composite 2-D.
+
+    Returns
+    -------
+    result : R2CeilingResult
+        Bracketed ceiling with singleton diagnostics.
+
+    Raises
+    ------
+    ValueError
+        If inputs are malformed, or if Var(y) = 0 (R^2 undefined).
+    """
+    y_arr, labels = _prepare_group_labels(y, groups)
+    n = y_arr.shape[0]
+    var_y = float(np.var(y_arr, ddof=0))
+    if var_y == 0.0:
+        raise ValueError("Var(y) = 0: R^2_ceiling is undefined (y is constant)")
+
+    unique, inv, counts = np.unique(labels, return_inverse=True, return_counts=True)
+    n_groups = unique.shape[0]
+    n_singletons = int((counts == 1).sum())
+    n_in_singletons = n_singletons  # each singleton group contributes 1 sample
+
+    # Non-singleton contribution is shared by both bounds.
+    non_singleton_contrib = 0.0
+    for j in range(n_groups):
+        if counts[j] == 1:
+            continue
+        v_j = float(np.var(y_arr[inv == j], ddof=0))
+        non_singleton_contrib += (counts[j] / n) * v_j
+
+    # Optimistic: singletons contribute 0.
+    wgv_opt = non_singleton_contrib
+    # Pessimistic: singletons contribute Var(y) each, weighted by 1/N each.
+    wgv_pes = non_singleton_contrib + (n_singletons / n) * var_y
+
+    optimistic = 1.0 - wgv_opt / var_y
+    pessimistic = 1.0 - wgv_pes / var_y
+
+    # Clip float noise only; values outside [0, 1] on real data indicate
+    # a bug and should be preserved for inspection rather than silently hidden.
+    if -1e-12 < optimistic - 1.0 < 0:
+        optimistic = min(optimistic, 1.0)
+    if -1e-12 < -pessimistic < 0:
+        pessimistic = max(pessimistic, 0.0)
+
+    return R2CeilingResult(
+        optimistic=float(optimistic),
+        pessimistic=float(pessimistic),
+        n_samples=n,
+        n_groups=n_groups,
+        n_singletons=n_singletons,
+        singleton_fraction=n_in_singletons / n,
+        var_y=var_y,
+    )
