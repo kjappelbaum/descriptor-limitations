@@ -231,11 +231,95 @@ def _(
 
 
 @app.cell
-def _():
-    # TODO: interpret after running. Placeholder cell.
-    # Discuss with collaborator before writing conclusions.
-    """## TODO: interpret after seeing numbers."""
+def _(mo):
+    mo.md(
+        r"""
+        ## Interpretation
+
+        ### Headline ceilings (categorical, no DFT)
+
+        | Descriptor | R²_ceiling |
+        |---|---|
+        | base × ligand × halide × additive (4-way) | **bracket [0.802, 1.000]** |
+        | ligand × halide × additive | 0.802 |
+        | base × halide × additive | 0.793 |
+        | halide × additive | 0.645 |
+        | base × ligand × halide | 0.638 |
+        | halide alone | 0.409 |
+        | additive alone | 0.167 |
+        | ligand alone | 0.083 |
+        | plate (batch) | 0.052 |
+        | base alone | 0.049 |
+
+        The 4-way bracket is `[0, 1]` from singleton analysis alone (every
+        condition is unique by design), but the data-processing inequality
+        tightens the lower edge to the maximum coarser ceiling: 0.802. So
+        the honest 4-way bracket is `[0.802, 1.000]`.
+
+        ### Where the published numbers sit
+
+        | Regime | Published R² | Reproduced (one-hot RF) | Relevant ceiling |
+        |---|---|---|---|
+        | 70/30 random split | 0.92 | 0.870 | [0.802, 1.000] |
+        | Leave-one-additive-out | 0.83 | −0.15 | 0.638 (b × l × h only) |
+
+        Random-split: 0.92 lies inside the categorical 4-way bracket — no
+        ceiling violation. Most of that performance is reachable by
+        one-hot identity (0.87); the extra 0.05 is plausibly from DFT
+        encoding partial similarity between near-singleton training points.
+
+        LOO-additive: with one-hot, the held-out additive's column is all
+        zero at test time, so the model cannot use additive identity at
+        all and collapses to R² = −0.15. The published 0.83 with DFT
+        features sits *above* the (b × l × h) categorical ceiling of 0.638
+        — but this is consistent rather than contradictory, because DFT
+        features carry continuous chemical similarity that the categorical
+        identity-or-nothing encoding throws away. This matches the Ahneman
+        et al. response to Chuang & Keiser: chemistry-encoding does
+        generalize across additives in a way that random barcodes cannot.
+
+        ### What the ceiling framework adds to the Chuang/Keiser debate
+
+        The framework does **not** resolve whether DFT features carry
+        chemistry beyond identity-as-fingerprint. It does:
+
+        * give a predictor-agnostic upper bound at every descriptor
+          resolution, with no model training required;
+        * force honest bracketing under singleton designs;
+        * locate every evaluation regime (random split, LOO-additive,
+          LOO-other) in a principled landscape of upper bounds.
+
+        For Doyle specifically, the headline finding is *not* "the
+        published model exceeds the ceiling" (it doesn't, when the
+        data-processing inequality is applied). The headline is: "every
+        evaluation regime can be situated against a non-trivial,
+        predictor-agnostic ceiling, computed from data alone."
+
+        ### Caveats
+
+        * **Comparing across regimes.** The 0.638 (b,l,h) ceiling is a
+          population R² over all 4312 rows; the 0.83 LOO-additive is a
+          mean over 24 different test subsets. The numbers are not
+          directly comparable; a fold-matched ceiling computation would
+          be tighter and is a candidate follow-up.
+        * **Plate effects.** Plate alone explains 5% of variance — non-
+          zero but small. Whether to include plate as a descriptor or
+          regress it out before the ceiling analysis is a judgment call.
+        * **DFT vs categorical.** Wherever a continuous descriptor Z is a
+          deterministic function of categorical identity Y (Z = f(Y)),
+          R²_ceiling(Z) ≤ R²_ceiling(Y) by data processing on a fixed
+          population. The LOO-additive regime breaks this comparison
+          because the test population's identities are unobserved at
+          training time, making categorical identity degenerate there.
+        """
+    )
     return
+
+
+@app.cell
+def _():
+    import marimo as mo
+    return (mo,)
 
 
 if __name__ == "__main__":
