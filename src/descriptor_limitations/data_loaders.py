@@ -348,3 +348,85 @@ def load_sms(*, cache_dir: Path | None = None) -> pd.DataFrame:
     df["binary_success_score"] = df["score"] >= 0.5
 
     return df.reset_index(drop=True)
+
+
+# -- MPEA: Multi-Principal Element Alloys ---------------------------------
+
+# Source: Borg et al. "Expanded dataset of mechanical properties and
+# observed phases of multi-principal element alloys." Sci. Data 7, 430
+# (2020). doi:10.1038/s41597-020-00768-9
+# Raw CSV from Citrine Informatics' reference repo:
+#   https://github.com/CitrineInformatics/MPEA_dataset
+_MPEA_URL = (
+    "https://raw.githubusercontent.com/CitrineInformatics/MPEA_dataset/"
+    "master/MPEA_dataset.csv"
+)
+_MPEA_RAW = _DATA_DIR / "mpea" / "raw" / "MPEA_dataset.csv"
+
+# Short column names for the subset we use downstream. The raw CSV uses
+# LaTeX-formatted headers; we keep the raw DataFrame but add these
+# aliased columns for convenience.
+_MPEA_RENAME = {
+    "FORMULA": "formula",
+    "PROPERTY: Microstructure": "microstructure",
+    "PROPERTY: Processing method": "processing",
+    "PROPERTY: BCC/FCC/other": "phase",
+    "PROPERTY: grain size ($\\mu$m)": "grain_size_um",
+    "PROPERTY: Type of test": "test_type",
+    "PROPERTY: Test temperature ($^\\circ$C)": "test_T_C",
+    "PROPERTY: YS (MPa)": "YS_MPa",
+    "PROPERTY: UTS (MPa)": "UTS_MPa",
+    "PROPERTY: Elongation (%)": "elongation_pct",
+    "PROPERTY: HV": "hardness_HV",
+}
+
+
+def load_mpea(*, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Load the Borg et al. 2020 MPEA mechanical properties dataset.
+
+    Returns all 1545 raw records (630 unique FORMULAs, 265 source
+    articles) with both the original LaTeX-formatted column names and
+    a short-alias set for the mechanical-property subset used in the
+    ceiling analysis.
+
+    Coverage of the key columns (as of 2020 compilation):
+      formula          : 1545 rows (no missing)
+      YS_MPa           : 1067 rows (478 missing)
+      grain_size_um    :  237 rows (1308 missing)
+      test_T_C         : 1364 rows (181 missing)
+      YS + grain       :  207 rows (the Hall-Petch working subset)
+
+    Short-alias columns are added alongside the originals:
+      formula, microstructure, processing, phase, grain_size_um,
+      test_type, test_T_C, YS_MPa, UTS_MPa, elongation_pct, hardness_HV.
+
+    Parameters
+    ----------
+    cache_dir : Path, optional
+        Override the default cache location (``data/mpea/raw``).
+
+    Returns
+    -------
+    df : pd.DataFrame
+        All 1545 records.
+    """
+    raw_path = (
+        _MPEA_RAW if cache_dir is None else Path(cache_dir) / "MPEA_dataset.csv"
+    )
+    _download_if_missing(_MPEA_URL, raw_path)
+    df = pd.read_csv(raw_path)
+    if len(df) != 1545:
+        raise RuntimeError(
+            f"load_mpea: expected 1545 rows, got {len(df)}. Upstream data "
+            "may have changed."
+        )
+    if df["FORMULA"].nunique() != 630:
+        raise RuntimeError(
+            f"load_mpea: expected 630 unique FORMULAs, got "
+            f"{df['FORMULA'].nunique()}."
+        )
+    # Add short aliases without dropping originals.
+    for src, dst in _MPEA_RENAME.items():
+        if src in df.columns and dst not in df.columns:
+            df[dst] = df[src]
+    return df.reset_index(drop=True)
