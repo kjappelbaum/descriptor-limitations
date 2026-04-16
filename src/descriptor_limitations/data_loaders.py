@@ -430,3 +430,103 @@ def load_mpea(*, cache_dir: Path | None = None) -> pd.DataFrame:
         if src in df.columns and dst not in df.columns:
             df[dst] = df[src]
     return df.reset_index(drop=True)
+
+
+# -- AqSolDB: aqueous solubility ------------------------------------------
+
+# Source: Sorkun, Khetan, Er. "AqSolDB, a curated reference set of aqueous
+# solubility and 2D descriptors for a diverse set of compounds." Sci. Data
+# 6, 143 (2019). doi:10.1038/s41597-019-0151-1
+# Raw sub-datasets (A-I) and curated file from:
+#   https://github.com/mcsorkun/AqSolDB
+_AQSOL_CURATED_URL = (
+    "https://raw.githubusercontent.com/mcsorkun/AqSolDB/master/results/"
+    "data_curated.csv"
+)
+_AQSOL_CURATED_RAW = _DATA_DIR / "aqsoldb" / "raw" / "data_curated.csv"
+_AQSOL_SUBSETS = tuple("ABCDEFGHI")
+_AQSOL_SUB_URL = (
+    "https://raw.githubusercontent.com/mcsorkun/AqSolDB/master/data/"
+    "dataset-{letter}.csv"
+)
+
+
+def load_aqsoldb_curated(*, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Load the AqSolDB curated dataset (one row per unique InChIKey).
+
+    9982 compounds; ``SD`` reports the standard deviation across
+    sources (LogS units). ``Occurrences`` counts the number of
+    *distinct* (rounded) Solubility values seen for the compound
+    across the 9 source datasets -- NOT the number of sources that
+    reported it. For replicate-based ceiling analysis, use the
+    source-level table from `load_aqsoldb_sources`; Occurrences is a
+    useful coarse filter but under-counts actual measurements.
+
+    Parameters
+    ----------
+    cache_dir : Path, optional
+        Override the default cache location (``data/aqsoldb/raw``).
+
+    Returns
+    -------
+    df : pd.DataFrame
+        Curated CSV as published. Key columns: ``SMILES``, ``InChIKey``,
+        ``Solubility`` (median log S, mol/L), ``SD``, ``Occurrences``,
+        ``Group`` (reliability tier).
+    """
+    raw_path = (
+        _AQSOL_CURATED_RAW
+        if cache_dir is None
+        else Path(cache_dir) / "data_curated.csv"
+    )
+    _download_if_missing(_AQSOL_CURATED_URL, raw_path)
+    df = pd.read_csv(raw_path)
+    if len(df) != 9982:
+        raise RuntimeError(
+            f"load_aqsoldb_curated: expected 9982 rows, got {len(df)}."
+        )
+    return df
+
+
+def load_aqsoldb_sources(*, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Load the 9 raw AqSolDB sub-datasets merged to a single long frame.
+
+    Each row is one source-level measurement. Columns: ``source``
+    (A..I), ``ID``, ``Name``, ``InChI``, ``InChIKey``, ``SMILES``,
+    ``Solubility`` (log S, mol/L). The ``Prediction`` column from the
+    source datasets is dropped (it is a model-derived estimate, not
+    experiment).
+
+    To recover per-compound replicate structure:
+    ``df.groupby('InChIKey')['Solubility']`` gives all source
+    measurements for each compound.
+
+    Parameters
+    ----------
+    cache_dir : Path, optional
+        Override the default cache location (``data/aqsoldb/raw``).
+
+    Returns
+    -------
+    long : pd.DataFrame
+        Concatenated long-form table, one row per source-level
+        measurement. Typically ~10-12k rows (9982 unique InChIKeys +
+        the multi-source duplicates).
+    """
+    if cache_dir is None:
+        base = _DATA_DIR / "aqsoldb" / "raw"
+    else:
+        base = Path(cache_dir)
+    parts = []
+    for letter in _AQSOL_SUBSETS:
+        dest = base / f"dataset-{letter}.csv"
+        _download_if_missing(_AQSOL_SUB_URL.format(letter=letter), dest)
+        sub = pd.read_csv(dest)
+        sub["source"] = letter
+        parts.append(sub)
+    long = pd.concat(parts, ignore_index=True)
+    # Drop the per-source ML prediction column; keep only experimental
+    # labels and identifiers.
+    if "Prediction" in long.columns:
+        long = long.drop(columns=["Prediction"])
+    return long.reset_index(drop=True)
