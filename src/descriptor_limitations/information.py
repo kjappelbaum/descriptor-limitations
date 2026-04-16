@@ -645,3 +645,182 @@ def bootstrap_ci(
         mode=mode,
         samples=samples,
     )
+
+
+# -- Fano's inequality -----------------------------------------------------
+
+def _binary_entropy(p: float) -> float:
+    """H2(p) = -p log2 p - (1-p) log2(1-p), in bits; 0 at p=0, p=1."""
+    if p <= 0.0 or p >= 1.0:
+        return 0.0
+    return -p * np.log2(p) - (1.0 - p) * np.log2(1.0 - p)
+
+
+def fano_bound(
+    H_cond: float,
+    M: int,
+    *,
+    variant: Literal["weak", "tight"] = "tight",
+) -> float:
+    """Fano lower bound on the minimum probability of prediction error.
+
+    For any classifier ĝ(Y) predicting X in {1, ..., M}, if
+    P_e = P(ĝ(Y) != X) and H(X | Y) is the conditional entropy in bits,
+    Fano's inequality gives two forms:
+
+    * Weak (closed form):
+          P_e >= (H(X|Y) - 1) / log2(M)
+      Simple but loose. Used as a quick check.
+
+    * Tight (numerical inversion):
+          H(X|Y) <= H2(P_e) + P_e * log2(M - 1)
+      where H2 is the binary entropy. Solving for P_e by bisection on
+      the RHS (which is monotone increasing in P_e on [0, 1 - 1/M])
+      gives the tight Fano bound.
+
+    Convention
+    ----------
+    Code `H_cond`, `M` use the standard information-theoretic symbols
+    directly (no renaming); they quantify properties of the math X | Y
+    (code y | X).
+
+    Parameters
+    ----------
+    H_cond : float
+        Conditional entropy H(X | Y) in bits. Must be non-negative.
+    M : int
+        Number of outcome classes. Must be >= 2.
+    variant : {"weak", "tight"}
+        Which form of Fano to return.
+
+    Returns
+    -------
+    P_e_min : float
+        Lower bound on the minimum achievable prediction error
+        probability. Clipped to [0, 1 - 1/M] (the max error of a
+        confused classifier on M uniform classes). A value of 0 means
+        Fano gives no information (H_cond too small given M).
+
+    Raises
+    ------
+    ValueError
+        If M < 2, H_cond < 0, or `variant` is unknown.
+    """
+    if M < 2:
+        raise ValueError(f"M must be >= 2, got {M}")
+    if H_cond < 0:
+        raise ValueError(f"H_cond must be non-negative, got {H_cond}")
+    if variant not in ("weak", "tight"):
+        raise ValueError(
+            f"variant must be 'weak' or 'tight', got {variant!r}"
+        )
+
+    if variant == "weak":
+        return float(max(0.0, (H_cond - 1.0) / np.log2(M)))
+
+    # Tight: solve H_cond = H2(p) + p * log2(M - 1) for p on [0, 1 - 1/M].
+    # RHS is monotone increasing on this interval; use bisection.
+    upper = 1.0 - 1.0 / M
+    # If H_cond exceeds the max of the RHS (log2 M), classifier error is
+    # at the uniform-guess ceiling.
+    if H_cond >= np.log2(M):
+        return float(upper)
+
+    def rhs(p: float) -> float:
+        return _binary_entropy(p) + p * np.log2(M - 1)
+
+    # Guard: rhs(0) = 0, rhs(upper) = log2(M).
+    lo, hi = 0.0, upper
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if rhs(mid) < H_cond:
+            lo = mid
+        else:
+            hi = mid
+    return float(0.5 * (lo + hi))
+
+
+def predictability(H_cond: float, M: int) -> float:
+    """Upper bound on prediction accuracy: Pi = 1 - P_e*(tight Fano).
+
+    Parameters
+    ----------
+    H_cond : float
+        H(X | Y) in bits.
+    M : int
+        Number of outcome classes.
+
+    Returns
+    -------
+    Pi : float
+        Upper bound on P(ĝ(Y) = X) for any classifier ĝ, in [1/M, 1].
+    """
+    return float(1.0 - fano_bound(H_cond, M, variant="tight"))
+
+
+def fano_bound_noisy(
+    H_cond_noisy: float,
+    M: int,
+    epsilon: float | None = None,
+    *,
+    variant: Literal["weak", "tight"] = "tight",
+) -> float:
+    """Fano bound corrected for label noise.
+
+    Let X be the clean label and X̃ the observed (noisy) label, with
+    label-flip rate `epsilon` (symmetric noise: each class is relabeled
+    to a uniform wrong class with probability epsilon, independent of Y).
+    Observed H(X̃ | Y) generally exceeds H(X | Y), so a Fano bound
+    computed from X̃ is conservative: it overestimates the clean-label
+    error floor.
+
+    Two outputs are combined:
+
+    * If `epsilon` is None: just return Fano applied to H_cond_noisy,
+      which is a valid (conservative) lower bound on P_e*(X̃). This is
+      the default "noisy labels can only raise the floor" version.
+
+    * If `epsilon` is provided (in (0, (M-1)/M)): apply Natarajan et
+      al. (2013, NIPS) style correction. The achievable clean-label
+      error P_e*(X) is bounded below by:
+          (Fano(H_cond_noisy, M) - epsilon) / (1 - M/(M-1) * epsilon)
+      clipped to [0, 1 - 1/M]. Uncorrected Fano is used when the
+      clip binds.
+
+    Parameters
+    ----------
+    H_cond_noisy : float
+        H(X̃ | Y) estimated from noisy labels, in bits.
+    M : int
+        Number of outcome classes.
+    epsilon : float or None
+        Symmetric noise rate in [0, (M-1)/M). If None, returns the
+        uncorrected (conservative) Fano bound.
+    variant : {"weak", "tight"}
+        Form of the base Fano bound.
+
+    Returns
+    -------
+    P_e_clean_min : float
+        Lower bound on the clean-label error probability.
+
+    Raises
+    ------
+    ValueError
+        If epsilon is out of range.
+    """
+    base = fano_bound(H_cond_noisy, M, variant=variant)
+    if epsilon is None:
+        return base
+    if not (0.0 <= epsilon < (M - 1) / M):
+        raise ValueError(
+            f"epsilon must be in [0, (M-1)/M) = [0, {(M-1)/M}), got {epsilon}"
+        )
+    if epsilon == 0.0:
+        return base
+    denom = 1.0 - (M / (M - 1)) * epsilon
+    if denom <= 0:
+        return base  # defensive; guarded by the range check above
+    corrected = (base - epsilon) / denom
+    upper = 1.0 - 1.0 / M
+    return float(min(max(corrected, 0.0), upper))

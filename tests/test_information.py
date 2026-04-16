@@ -7,7 +7,10 @@ from descriptor_limitations.information import (
     bootstrap_ci,
     conditional_entropy,
     entropy,
+    fano_bound,
+    fano_bound_noisy,
     mutual_information,
+    predictability,
     r2_ceiling,
     singleton_fraction,
     within_group_variance,
@@ -451,3 +454,111 @@ def test_bootstrap_ci_catches_nonfinite():
             np.array([1.0, 2.0]), np.array([0, 1]), bad_func,
             n_boot=10, ci=0.95, mode="pairs", random_state=0,
         )
+
+
+# ---------- fano_bound ----------
+
+def test_fano_zero_conditional_entropy_returns_zero():
+    """H(X|Y) = 0 -> Fano bound = 0 (Y determines X)."""
+    for M in [2, 4, 8, 17]:
+        assert fano_bound(0.0, M, variant="weak") == pytest.approx(0.0)
+        assert fano_bound(0.0, M, variant="tight") == pytest.approx(0.0)
+
+
+def test_fano_max_entropy_returns_uniform_error():
+    """H(X|Y) = log2(M) -> P_e* = 1 - 1/M (Y carries no info)."""
+    for M in [2, 4, 8]:
+        expected = 1.0 - 1.0 / M
+        tight = fano_bound(np.log2(M), M, variant="tight")
+        assert tight == pytest.approx(expected, abs=1e-6)
+
+
+def test_fano_tight_dominates_weak_on_valid_range():
+    """Tight Fano is a stronger lower bound than weak Fano, for any H in
+    [0, log2 M]."""
+    for M in [2, 4, 8]:
+        for H in np.linspace(0.0, np.log2(M), 20):
+            weak = fano_bound(H, M, variant="weak")
+            tight = fano_bound(H, M, variant="tight")
+            assert tight >= weak - 1e-9
+
+
+def test_fano_weak_exact_formula():
+    """Weak Fano = max(0, (H_cond - 1) / log2 M)."""
+    for (H, M, expected) in [
+        (2.0, 4, 0.5),       # (2-1)/log2(4) = 0.5
+        (0.5, 4, 0.0),       # negative -> clipped
+        (3.0, 8, (3.0-1)/3), # /log2(8)=3
+    ]:
+        assert fano_bound(H, M, variant="weak") == pytest.approx(expected)
+
+
+def test_fano_tight_inverts_binary_entropy_correctly():
+    """For M=2, the tight bound on H=1 is p=0.5; on H=0 is p=0."""
+    assert fano_bound(1.0, 2, variant="tight") == pytest.approx(0.5, abs=1e-6)
+    assert fano_bound(0.5, 2, variant="tight") == pytest.approx(0.1100, abs=1e-3)
+
+
+def test_fano_rejects_bad_M():
+    with pytest.raises(ValueError, match="M must"):
+        fano_bound(0.5, 1)
+
+
+def test_fano_rejects_negative_H():
+    with pytest.raises(ValueError, match="non-negative"):
+        fano_bound(-0.1, 4)
+
+
+def test_fano_rejects_bad_variant():
+    with pytest.raises(ValueError, match="variant"):
+        fano_bound(0.5, 4, variant="loose")
+
+
+# ---------- predictability ----------
+
+def test_predictability_complement_of_fano():
+    for H, M in [(0.0, 2), (0.5, 4), (2.0, 8), (3.0, 16)]:
+        assert predictability(H, M) == pytest.approx(1.0 - fano_bound(H, M, variant="tight"))
+
+
+def test_predictability_max_at_zero_H():
+    assert predictability(0.0, 5) == pytest.approx(1.0)
+
+
+def test_predictability_min_at_max_H():
+    assert predictability(np.log2(4), 4) == pytest.approx(1.0 / 4, abs=1e-6)
+
+
+# ---------- fano_bound_noisy ----------
+
+def test_fano_noisy_no_epsilon_matches_plain():
+    """With epsilon=None, should equal fano_bound on the same H."""
+    assert fano_bound_noisy(0.8, 4, epsilon=None) == pytest.approx(
+        fano_bound(0.8, 4, variant="tight")
+    )
+
+
+def test_fano_noisy_zero_epsilon_matches_plain():
+    assert fano_bound_noisy(0.8, 4, epsilon=0.0) == pytest.approx(
+        fano_bound(0.8, 4, variant="tight")
+    )
+
+
+def test_fano_noisy_higher_epsilon_gives_smaller_or_equal_clean_bound():
+    """Natarajan correction: P_e_clean = (Fano_noisy - eps) / (1 - M/(M-1) eps).
+    For fixed H_cond_noisy, increasing eps decreases the numerator faster
+    than the denominator, so the clean bound decreases (or clips to 0)."""
+    vals = [
+        fano_bound_noisy(1.5, 4, epsilon=e)
+        for e in [0.0, 0.05, 0.10, 0.20]
+    ]
+    # Monotonically non-increasing, and clips at 0 from below.
+    for a, b in zip(vals, vals[1:]):
+        assert b <= a + 1e-9
+
+
+def test_fano_noisy_rejects_out_of_range_epsilon():
+    with pytest.raises(ValueError, match="epsilon"):
+        fano_bound_noisy(1.0, 4, epsilon=0.8)  # >= (M-1)/M = 0.75
+    with pytest.raises(ValueError, match="epsilon"):
+        fano_bound_noisy(1.0, 4, epsilon=-0.1)
