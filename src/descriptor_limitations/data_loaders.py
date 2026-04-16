@@ -255,3 +255,96 @@ def expand_polymetrix_tg(df: pd.DataFrame) -> pd.DataFrame:
                 "measurement_index": i,
             })
     return pd.DataFrame(rows)
+
+
+# -- SMS: Solvothermal MOF Synthesis ---------------------------------------
+
+# Source: Novotny et al. "SMS: A curated dataset on solvothermal MOF
+# syntheses." (Zenodo 15045511). Raw CSV from the authors' reference repo:
+#   https://github.com/JorenBE/SMS/tree/main/experiments/Supervised
+_SMS_URL = (
+    "https://raw.githubusercontent.com/JorenBE/SMS/main/"
+    "experiments/Supervised/20240402_syntheses_UTF8.csv"
+)
+_SMS_RAW = _DATA_DIR / "sms" / "raw" / "20240402_syntheses_UTF8.csv"
+
+# Outcomes counted as "success" under the primary binary target.
+_SMS_SUCCESS_OUTCOMES = frozenset({"successful", "good"})
+
+
+def load_sms(*, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Load the SMS solvothermal MOF synthesis dataset.
+
+    Returns 484 curated MOF syntheses with mixed categorical and
+    continuous descriptors, a continuous ``score`` (0.00-1.00), and a
+    17-level ``outcome`` label. 19 of the 484 entries are expert-
+    generated infeasibility controls (``Category == 'generated'``,
+    ``outcome == 'incompatible'``) rather than literature-reported
+    experiments; these are flagged via the boolean ``is_generated``
+    column so downstream code can report ceilings with and without them.
+
+    Two binary success targets are added for convenience:
+
+    * ``binary_success_outcome``: ``outcome in {'successful', 'good'}``
+      (316 / 484 = 65%).
+    * ``binary_success_score``: ``score >= 0.5``
+      (351 / 484 = 73%).
+
+    The original two unlabeled spacer columns (``Unnamed: 15`` and
+    ``Unnamed: 20``) are dropped.
+
+    Parameters
+    ----------
+    cache_dir : Path, optional
+        Override the default cache location (``data/sms/raw``).
+
+    Returns
+    -------
+    df : pd.DataFrame
+        Columns include: ligand name, T [C], t [h], solvent1-3 with
+        volume fractions, inorganic salt, metal, additional, reported
+        DOI, outcome, score, CCDC, Category, plus the derived
+        ``is_generated``, ``binary_success_outcome``,
+        ``binary_success_score``.
+    """
+    raw_path = (
+        _SMS_RAW
+        if cache_dir is None
+        else Path(cache_dir) / "20240402_syntheses_UTF8.csv"
+    )
+    _download_if_missing(_SMS_URL, raw_path)
+    df = pd.read_csv(raw_path)
+
+    # Drop spacer columns if present.
+    df = df.drop(
+        columns=[c for c in df.columns if c.startswith("Unnamed:")],
+        errors="ignore",
+    )
+
+    if len(df) != 484:
+        raise RuntimeError(
+            f"load_sms: expected 484 rows, got {len(df)}. Upstream data "
+            "may have changed."
+        )
+
+    expected_categories = {"optimization", "chiralty", "review", "generated"}
+    got_categories = set(df["Category"].unique())
+    if got_categories != expected_categories:
+        raise RuntimeError(
+            f"load_sms: Category set {got_categories} differs from expected "
+            f"{expected_categories}."
+        )
+
+    # Score range check.
+    if not ((df["score"] >= 0.0) & (df["score"] <= 1.0)).all():
+        raise RuntimeError(
+            f"load_sms: score out of [0, 1] range "
+            f"(min={df['score'].min()}, max={df['score'].max()})."
+        )
+
+    # Derived flags.
+    df["is_generated"] = df["Category"] == "generated"
+    df["binary_success_outcome"] = df["outcome"].isin(_SMS_SUCCESS_OUTCOMES)
+    df["binary_success_score"] = df["score"] >= 0.5
+
+    return df.reset_index(drop=True)
