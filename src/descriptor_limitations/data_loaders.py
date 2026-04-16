@@ -8,6 +8,7 @@ datasets enter the analysis pipeline.
 
 from __future__ import annotations
 
+import ast
 import urllib.request
 from pathlib import Path
 
@@ -136,3 +137,121 @@ def load_doyle(*, cache_dir: Path | None = None) -> pd.DataFrame:
         )
 
     return df.reset_index(drop=True)
+
+
+# -- PolyMetriX curated polymer Tg dataset ---------------------------------
+
+# Source: Kunchapu & Jablonka. "PolyMetriX: an ecosystem for digital polymer
+# chemistry." npj Comput. Mater. 11, 312 (2025). doi:10.1038/s41524-025-01823-y
+# Curated dataset on Zenodo: doi:10.5281/zenodo.15210035
+_POLYTG_URL = (
+    "https://zenodo.org/records/15210035/files/"
+    "LAMALAB_CURATED_Tg_structured_polymerclass.csv?download=1"
+)
+_POLYTG_RAW = (
+    _DATA_DIR / "polymer_tg" / "raw"
+    / "LAMALAB_CURATED_Tg_structured_polymerclass.csv"
+)
+
+
+def load_polymetrix_tg(*, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Load the PolyMetriX curated polymer Tg dataset.
+
+    One row per unique PSMILES (7367 rows). The full set of source-level
+    Tg measurements is preserved in ``meta.tg_values`` (a string-encoded
+    Python list). Use `expand_polymetrix_tg` to expand to long form
+    (one row per individual measurement) for ceiling analysis.
+
+    The dataset has four reliability tiers:
+
+    * black  (7088 rows) -- single source per PSMILES (singletons)
+    * yellow ( 132 rows) -- two sources, agreement (Z <= 2)
+    * gold   ( 143 rows) -- three or more sources, agreement (Z <= 2)
+    * red    (   4 rows) -- multiple sources, disagreement (Z > 2)
+
+    Yellow+Gold+Red rows carry within-PSMILES Tg variance and are the
+    informative subset for r2_ceiling computation.
+
+    Parameters
+    ----------
+    cache_dir : Path, optional
+        Override the default cache location (``data/polymer_tg/raw``).
+
+    Returns
+    -------
+    df : pd.DataFrame
+        112-column curated CSV as published, with columns including
+        ``PSMILES``, ``labels.Exp_Tg(K)``, ``meta.tg_values``,
+        ``meta.num_of_points``, ``meta.std``, ``meta.reliability``,
+        and PolyMetriX features.
+    """
+    raw_path = (
+        _POLYTG_RAW
+        if cache_dir is None
+        else Path(cache_dir) / "LAMALAB_CURATED_Tg_structured_polymerclass.csv"
+    )
+    _download_if_missing(_POLYTG_URL, raw_path)
+    df = pd.read_csv(raw_path)
+    if "PSMILES" not in df.columns or "labels.Exp_Tg(K)" not in df.columns:
+        raise RuntimeError(
+            "load_polymetrix_tg: expected columns missing -- upstream CSV "
+            "schema may have changed."
+        )
+    return df
+
+
+def expand_polymetrix_tg(df: pd.DataFrame) -> pd.DataFrame:
+    """Expand the curated Tg dataset to one row per individual measurement.
+
+    For singletons (``num_of_points == 1`` and ``meta.tg_values`` empty),
+    the row's ``labels.Exp_Tg(K)`` is the single measurement. For multi-
+    source rows, ``meta.tg_values`` holds a list literal of all reported
+    Tg values across sources; each is emitted as a separate row.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Output of `load_polymetrix_tg`.
+
+    Returns
+    -------
+    long : pd.DataFrame
+        Columns: ``psmiles``, ``tg_K``, ``reliability``,
+        ``num_of_points``, ``measurement_index`` (0-based within group).
+
+    Raises
+    ------
+    ValueError
+        If a multi-source row's ``meta.tg_values`` cannot be parsed or
+        its length disagrees with ``meta.num_of_points``.
+    """
+    rows = []
+    for _, r in df.iterrows():
+        psmiles = r["PSMILES"]
+        n = int(r["meta.num_of_points"])
+        reliability = r["meta.reliability"]
+        tg_values_raw = r["meta.tg_values"]
+        if n == 1:
+            measurements = [float(r["labels.Exp_Tg(K)"])]
+        else:
+            try:
+                measurements = ast.literal_eval(tg_values_raw)
+            except (ValueError, SyntaxError) as e:
+                raise ValueError(
+                    f"Cannot parse meta.tg_values for PSMILES={psmiles}: "
+                    f"{tg_values_raw!r} ({e})"
+                )
+            if len(measurements) != n:
+                raise ValueError(
+                    f"meta.tg_values length {len(measurements)} disagrees "
+                    f"with meta.num_of_points {n} for PSMILES={psmiles}"
+                )
+        for i, tg in enumerate(measurements):
+            rows.append({
+                "psmiles": psmiles,
+                "tg_K": float(tg),
+                "reliability": reliability,
+                "num_of_points": n,
+                "measurement_index": i,
+            })
+    return pd.DataFrame(rows)
