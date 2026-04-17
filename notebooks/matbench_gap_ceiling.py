@@ -76,36 +76,43 @@ def _(
 def _(mp, pd, r2_ceiling, np):
     """(1) Composition-only ceiling for MP-DFT band gap from polymorph
     disagreement."""
-    per_form = mp["reduced_formula"].value_counts()
-    multi_iks = per_form[per_form >= 2].index
-    multi = mp[mp["reduced_formula"].isin(multi_iks)]
+    # Identify real polymorphs (gap range > 0.01 eV) vs numerical noise.
+    # 35.6% of multi-polymorph compositions have range <= 0.01 eV --
+    # these are DFT re-runs with near-identical convergence, not
+    # genuinely different crystal structures.
+    per_form = mp.groupby("reduced_formula")["mp_gap"].agg(["count", "min", "max"])
+    per_form["range"] = per_form["max"] - per_form["min"]
+    real_poly_forms = per_form[(per_form["count"] >= 2) & (per_form["range"] > 0.01)].index
+    multi_real = mp[mp["reduced_formula"].isin(real_poly_forms)]
 
-    r_all = r2_ceiling(mp["mp_gap"].to_numpy(), mp["reduced_formula"].to_numpy())
-    r_multi = r2_ceiling(
-        multi["mp_gap"].to_numpy(), multi["reduced_formula"].to_numpy()
-    )
+    # Also: restrict to compositions present in expt_gap (same population)
+    expt_forms = set(expt["reduced_formula"])
+    mp_expt_real = multi_real[multi_real["reduced_formula"].isin(expt_forms)]
 
-    def _fmt(r, label, n):
-        wgv_opt = (1 - r.optimistic) * r.var_y
-        wgv_pes = (1 - r.pessimistic) * r.var_y
+    def _fmt(r_val, label, n):
+        wgv_opt = (1 - r_val.optimistic) * r_val.var_y
+        wgv_pes = (1 - r_val.pessimistic) * r_val.var_y
         return {
             "subset": label,
             "n_rows": n,
-            "n_compositions": r.n_groups,
-            "n_singletons": r.n_singletons,
-            "R2_pess": round(r.pessimistic, 4),
-            "R2_opt": round(r.optimistic, 4),
+            "n_compositions": r_val.n_groups,
+            "n_singletons": r_val.n_singletons,
+            "R2_opt": round(r_val.optimistic, 4),
             "RMSE_floor_opt_eV": round(float(np.sqrt(wgv_opt)), 3),
-            "RMSE_floor_pess_eV": round(float(np.sqrt(wgv_pes)), 3),
             "MAE_floor_opt_eV": round(float(np.sqrt(2 * wgv_opt / np.pi)), 3),
         }
 
+    r_all = r2_ceiling(mp["mp_gap"].to_numpy(), mp["reduced_formula"].to_numpy())
+    r_real = r2_ceiling(multi_real["mp_gap"].to_numpy(), multi_real["reduced_formula"].to_numpy())
+    r_expt = r2_ceiling(mp_expt_real["mp_gap"].to_numpy(), mp_expt_real["reduced_formula"].to_numpy())
+
     mp_ceiling = pd.DataFrame([
-        _fmt(r_all, "all mp_gap (incl. 66k single-polymorph compositions)", len(mp)),
-        _fmt(r_multi, "multi-polymorph only (n_polymorphs >= 2)", len(multi)),
+        _fmt(r_all, "all mp_gap (incl. 66k single-polymorph)", len(mp)),
+        _fmt(r_real, "real polymorphs only (range > 0.01 eV)", len(multi_real)),
+        _fmt(r_expt, "real polymorphs, expt_gap compositions only", len(mp_expt_real)),
     ])
     mp_ceiling
-    return mp_ceiling, multi
+    return mp_ceiling, mp_expt_real, multi_real
 
 
 @app.cell
@@ -125,6 +132,13 @@ def _(expt, kendalltau, mp, np, pd, spearmanr):
     rho, _ = spearmanr(joined["expt_gap"], joined["mp_gap_mean"])
     r_pear = np.corrcoef(joined["expt_gap"], joined["mp_gap_mean"])[0, 1]
 
+    # Bias-corrected cross-theory: linear regression expt ~ mp
+    from numpy.polynomial.polynomial import polyfit as _polyfit
+    coeffs = _polyfit(joined["mp_gap_mean"].to_numpy(),
+                      joined["expt_gap"].to_numpy(), 1)
+    pred_linear = coeffs[1] * joined["mp_gap_mean"] + coeffs[0]
+    resid = joined["expt_gap"] - pred_linear
+
     cross_theory = pd.DataFrame([{
         "expt_gap_rows": len(expt),
         "rows_with_MP_match": len(joined),
@@ -135,6 +149,9 @@ def _(expt, kendalltau, mp, np, pd, spearmanr):
         "kendall_tau": round(tau, 3),
         "spearman_rho": round(rho, 3),
         "pearson_r2": round(float(r_pear ** 2), 3),
+        "RMSE_bias_corrected_eV": round(float(np.sqrt((resid ** 2).mean())), 3),
+        "linear_slope": round(float(coeffs[1]), 3),
+        "linear_intercept_eV": round(float(coeffs[0]), 3),
     }])
     cross_theory
     return cross_theory, joined

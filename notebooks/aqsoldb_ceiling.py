@@ -167,7 +167,13 @@ def _(Chem, Path, np, pd, r2_ceiling, srcs, urllib):
     }])
 
     # Ceiling on ESOL compounds using AqSolDB's source-level measurements.
-    aq_esol = srcs[srcs["InChIKey"].isin(esol_iks)]
+    # CRITICAL: exclude source G, which IS ESOL's own data (Delaney 2004).
+    # Including it would deflate within-compound variance via circularity.
+    aq_no_g = srcs[srcs["source"] != "G"]
+    aq_esol = aq_no_g[aq_no_g["InChIKey"].isin(esol_iks)]
+    per_ik_esol_corr = aq_esol.groupby("InChIKey").size()
+    multi_iks = set(per_ik_esol_corr[per_ik_esol_corr >= 2].index)
+    auditable = overlap & multi_iks
     aq_esol_multi = aq_esol[aq_esol["InChIKey"].isin(multi_iks)]
     r_esol = r2_ceiling(
         aq_esol_multi["Solubility"].to_numpy(),

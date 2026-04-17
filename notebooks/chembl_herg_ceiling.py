@@ -100,10 +100,43 @@ def _(herg, np, pd, per_mol, r2_ceiling):
             "MAE_floor": round(float(np.sqrt(2 * wgv / np.pi)), 3),
         }
 
-    ceil_table = pd.DataFrame([
-        _row(multi_herg, ">=2 assay measurements"),
-        _row(three_herg, ">=3 assay measurements"),
-    ])
+    # Full threshold sensitivity table
+    thresh_rows = []
+    for min_m in [2, 3, 5, 10]:
+        ids_t = per_mol[per_mol >= min_m].index
+        sub_t = herg[herg["mol_id"].isin(ids_t)]
+        if sub_t["mol_id"].nunique() < 10:
+            continue
+        r_t = r2_ceiling(sub_t["pIC50"].to_numpy(), sub_t["mol_id"].to_numpy())
+        wgv_t = (1 - r_t.optimistic) * r_t.var_y
+        thresh_rows.append({
+            "min_measurements": min_m,
+            "n_measurements": len(sub_t),
+            "n_compounds": r_t.n_groups,
+            "R2_ceiling": round(r_t.optimistic, 4),
+            "RMSE_floor": round(float(np.sqrt(wgv_t)), 3),
+        })
+    thresh_table = pd.DataFrame(thresh_rows)
+
+    # Fano binary analysis (blocker = pIC50 > 5, i.e. IC50 < 10 µM)
+    from descriptor_limitations.information import conditional_entropy, fano_bound, predictability
+    multi_herg_copy = multi_herg.copy()
+    multi_herg_copy["blocker"] = (multi_herg_copy["pIC50"] > 5).astype(int)
+    y_bin = multi_herg_copy["blocker"].to_numpy()
+    X_bin = multi_herg_copy["mol_id"].to_numpy()
+    H_cond_herg = conditional_entropy(y_bin, X_bin, correction="miller-madow")
+    pe_herg = fano_bound(H_cond_herg, 2, variant="tight")
+    pi_herg = predictability(H_cond_herg, 2)
+    base_err_herg = float(min(y_bin.mean(), 1 - y_bin.mean()))
+
+    fano_result = pd.DataFrame([{
+        "threshold": "pIC50 > 5 (IC50 < 10 µM)",
+        "blocker_rate": round(float(y_bin.mean()), 3),
+        "H(blocker|mol_id)_bits": round(H_cond_herg, 3),
+        "Fano_Pe_min": round(pe_herg, 3),
+        "predictability": round(pi_herg, 3),
+        "base_rate_error": round(base_err_herg, 3),
+    }])
 
     sd_per = multi_herg.groupby("mol_id")["pIC50"].std(ddof=0)
     sd_stats = pd.DataFrame([{
@@ -113,7 +146,7 @@ def _(herg, np, pd, per_mol, r2_ceiling):
         "p90": round(float(np.quantile(sd_per, 0.90)), 3),
         "max": round(sd_per.max(), 3),
     }])
-    return ceil_table, sd_stats
+    return fano_result, sd_stats, thresh_table
 
 
 @app.cell
@@ -122,27 +155,45 @@ def _(
     PUBLISHED_HERG_RMSE,
     PUBLISHED_HERGBOOST_R2,
     PUBLISHED_HERGBOOST_RMSE,
-    ceil_table,
+    fano_result,
     mo,
     sd_stats,
+    thresh_table,
 ):
-    ceiling_r2 = ceil_table.iloc[0]["R2_ceiling"]
+    ceiling_r2 = thresh_table.iloc[0]["R2_ceiling"]
     irreducible = round(1.0 - ceiling_r2, 3)
     headroom = round(ceiling_r2 - PUBLISHED_HERG_R2, 3)
     explained = round(PUBLISHED_HERG_R2, 3)
 
     mo.md(
         f"""
-        ## hERG IC50 descriptor ceiling from multi-assay variance
+        ## hERG IC50 descriptor ceiling — threshold sensitivity
+
+        The ceiling depends on assay diversity: compounds tested in
+        more assays show more within-compound variance (lower ceiling).
 
         ```
-{ceil_table.to_string(index=False)}
+{thresh_table.to_string(index=False)}
         ```
 
-        Within-compound pIC50 SD distribution:
+        Within-compound pIC50 SD distribution (>=2 measurements):
         ```
 {sd_stats.to_string(index=False)}
         ```
+
+        ## Fano binary analysis (hERG blocker classification)
+
+        ```
+{fano_result.to_string(index=False)}
+        ```
+
+        At the binary level (blocker vs non-blocker at IC50 = 10 µM),
+        compound identity nearly determines blocker status:
+        H(blocker|mol_id) = 0.148 bits, Fano P_e >= 2.1%. The binary
+        classification ceiling is very high (~98% accuracy achievable).
+        The challenge in hERG prediction is not binary classification
+        but **continuous IC50 ranking** — which is where the R^2
+        ceiling of 0.65-0.86 applies.
 
         ## Published reference points
 
