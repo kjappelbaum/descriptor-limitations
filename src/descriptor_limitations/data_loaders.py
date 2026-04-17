@@ -44,7 +44,13 @@ def _download_if_missing(url: str, dest: Path) -> None:
     if dest.exists():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
+    # Some data hosts block the default urllib User-Agent (e.g. matbench
+    # returns 403 for python-urllib/*). Send a standard UA string so the
+    # request looks like an ordinary download.
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 descriptor-limitations"}
+    )
+    with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
         f.write(resp.read())
 
 
@@ -530,3 +536,119 @@ def load_aqsoldb_sources(*, cache_dir: Path | None = None) -> pd.DataFrame:
     if "Prediction" in long.columns:
         long = long.drop(columns=["Prediction"])
     return long.reset_index(drop=True)
+
+
+# -- Matbench band gap benchmarks (expt + MP) -----------------------------
+
+# Source: Dunn, Wang, Ganose, Dopp, Jain. "Benchmarking materials property
+# prediction methods: the Matbench test suite and Automatminer reference
+# algorithm." npj Comput. Mater. 6, 138 (2020).
+# doi:10.1038/s41524-020-00406-3
+# Data URL: https://ml.materialsproject.org/projects/<task>.json.gz
+_MATBENCH_EXPT_GAP_URL = (
+    "https://ml.materialsproject.org/projects/matbench_expt_gap.json.gz"
+)
+_MATBENCH_MP_GAP_URL = (
+    "https://ml.materialsproject.org/projects/matbench_mp_gap.json.gz"
+)
+_MATBENCH_EXPT_GAP_RAW = (
+    _DATA_DIR / "matbench" / "raw" / "matbench_expt_gap.json.gz"
+)
+_MATBENCH_MP_GAP_RAW = (
+    _DATA_DIR / "matbench" / "raw" / "matbench_mp_gap.json.gz"
+)
+_MATBENCH_MP_GAP_COMPOSITIONS = (
+    _DATA_DIR / "matbench" / "processed" / "mp_gap_compositions.csv"
+)
+
+
+def load_matbench_expt_gap(*, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Load `matbench_expt_gap` (experimental band gaps, composition only).
+
+    4604 rows (one per unique composition). Columns:
+    ``composition``, ``expt_gap`` (eV).
+
+    The benchmark is deduplicated -- no within-composition replicates
+    are preserved. For ceiling analysis, merge with
+    `load_matbench_mp_gap_compositions` to recover cross-polymorph and
+    cross-theory variance per composition.
+    """
+    import gzip
+    import json as _json
+
+    raw_path = (
+        _MATBENCH_EXPT_GAP_RAW
+        if cache_dir is None
+        else Path(cache_dir) / "matbench_expt_gap.json.gz"
+    )
+    _download_if_missing(_MATBENCH_EXPT_GAP_URL, raw_path)
+    with gzip.open(raw_path) as f:
+        payload = _json.load(f)
+    df = pd.DataFrame(payload["data"], columns=payload["columns"])
+    df = df.rename(columns={"gap expt": "expt_gap"})
+    if len(df) != 4604:
+        raise RuntimeError(
+            f"load_matbench_expt_gap: expected 4604 rows, got {len(df)}."
+        )
+    return df
+
+
+def load_matbench_mp_gap_compositions(
+    *, cache_dir: Path | None = None
+) -> pd.DataFrame:
+    """Load compositions + DFT-PBE band gaps from `matbench_mp_gap`.
+
+    Returns 106113 rows (one per Materials Project entry). Columns:
+    ``reduced_formula`` (pymatgen reduced formula), ``mp_gap`` (eV).
+
+    Structures from the raw `matbench_mp_gap.json.gz` are reduced to
+    their composition string; the first call processes the 676 MB JSON
+    and caches a small CSV. Subsequent calls read the CSV directly.
+
+    Multiple rows per reduced_formula correspond to different polymorphs
+    (same composition, different crystal structures). Within-formula
+    variance in ``mp_gap`` quantifies the composition-only ceiling for
+    MP-DFT band gap prediction.
+    """
+    import gzip
+    import json as _json
+    from collections import Counter
+
+    from pymatgen.core import Composition
+
+    csv_path = (
+        _MATBENCH_MP_GAP_COMPOSITIONS
+        if cache_dir is None
+        else Path(cache_dir) / "mp_gap_compositions.csv"
+    )
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+
+    raw_path = (
+        _MATBENCH_MP_GAP_RAW
+        if cache_dir is None
+        else Path(cache_dir) / "matbench_mp_gap.json.gz"
+    )
+    _download_if_missing(_MATBENCH_MP_GAP_URL, raw_path)
+    with gzip.open(raw_path) as f:
+        payload = _json.load(f)
+
+    rows = []
+    for struct_dict, gap in payload["data"]:
+        comp_dict: Counter[str] = Counter()
+        for site in struct_dict["sites"]:
+            for sp in site["species"]:
+                comp_dict[sp["element"]] += sp["occu"]
+        rows.append({
+            "reduced_formula": Composition(dict(comp_dict)).reduced_formula,
+            "mp_gap": gap,
+        })
+    df = pd.DataFrame(rows)
+    if len(df) != 106113:
+        raise RuntimeError(
+            f"load_matbench_mp_gap_compositions: expected 106113 rows, "
+            f"got {len(df)}."
+        )
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(csv_path, index=False)
+    return df
